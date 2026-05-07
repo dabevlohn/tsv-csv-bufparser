@@ -191,7 +191,7 @@ fn parse_text_transaction(
     let fields = match format {
         RecordFormat::Csv => parse_csv_line(line),
         RecordFormat::Tsv => parse_tsv_line(line),
-        RecordFormat::Binary => parse_tsv_line(line),
+        _ => unreachable!(),
     };
 
     let fields = match fields {
