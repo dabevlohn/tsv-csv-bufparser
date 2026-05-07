@@ -6,9 +6,6 @@ digraph ParserFlowchart {
     node [shape=box, style="rounded,filled", fillcolor=lightblue, fontname="Arial"];
     edge [color=darkblue];
     
-    // Заголовок
-    title [label="CSV/TSV/БИНАРНЫЙ ПАРСЕР ТРАНЗАКЦИЙ", shape=plaintext, fontsize=16, fontname="Arial Bold"];
-    
     // Основные узлы
     main [label="main()\nParser::new(file, FORMAT)", fillcolor=lightgreen];
     format [label="RecordFormat", shape=diamond, fillcolor=lightyellow];
@@ -36,7 +33,6 @@ digraph ParserFlowchart {
     match_block [label="match trans {\nOk(t) → process(t)\nErr(e) → log(e)\n}", shape=box, fillcolor=lavender];
     
     // Связи
-    title -> main;
     main -> format;
     
     format -> csv [label="Csv"];
