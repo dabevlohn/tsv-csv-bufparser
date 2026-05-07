@@ -1,0 +1,67 @@
+digraph ParserFlowchart {
+    rankdir=TB;
+    size="12,16";
+    dpi=300;
+    
+    node [shape=box, style="rounded,filled", fillcolor=lightblue, fontname="Arial"];
+    edge [color=darkblue];
+    
+    // Заголовок
+    title [label="CSV/TSV/БИНАРНЫЙ ПАРСЕР ТРАНЗАКЦИЙ", shape=plaintext, fontsize=16, fontname="Arial Bold"];
+    
+    // Основные узлы
+    main [label="main()\nParser::new(file, FORMAT)", fillcolor=lightgreen];
+    format [label="RecordFormat", shape=diamond, fillcolor=lightyellow];
+    parser [label="Parser.transactions()\nIterator<Result<Transaction>>", fillcolor=lightcyan];
+    
+    // Форматы
+    csv [label="CSV", fillcolor=orange];
+    tsv [label="TSV", fillcolor=orange];
+    binary [label="Binary", fillcolor=orange];
+    
+    // Текстовая ветка
+    text_branch [label="TEXT\nBufReader.lines()\nparse_csv/tsv_line()", fillcolor=lightcoral];
+    parse_tx [label="parse_transaction()\n[date, category, kind, amount]", fillcolor=lightyellow];
+    
+    // Бинарная ветка
+    bin_sig [label="YPB1?", shape=diamond];
+    bin_invalid [label="ERROR\nInvalid signature", shape=ellipse, fillcolor=red];
+    bin_count [label="count: u32 LE", fillcolor=orange];
+    bin_loop [label="Loop 0..count", fillcolor=orange];
+    bin_record [label="parse_binary_record()\nu16 len + bytes\nkind:u8\namount:i64 LE", fillcolor=orange];
+    
+    // Общий
+    transaction [label="Transaction {...}", fillcolor=lightgreen];
+    consumer [label="for trans in iterator", fillcolor=lightpink];
+    match_block [label="match trans {\nOk(t) → process(t)\nErr(e) → log(e)\n}", shape=box, fillcolor=lavender];
+    
+    // Связи
+    title -> main;
+    main -> format;
+    
+    format -> csv [label="Csv"];
+    format -> tsv [label="Tsv"];
+    format -> binary [label="Binary"];
+    
+    csv -> parser [style=dashed];
+    tsv -> parser [style=dashed];
+    binary -> parser;
+    
+    parser -> text_branch [label="text"];
+    parser -> bin_sig [label="binary"];
+    
+    text_branch -> parse_tx;
+    parse_tx -> transaction;
+    
+    bin_sig -> bin_invalid [label="No"];
+    bin_sig -> bin_count [label="Yes"];
+    bin_count -> bin_loop;
+    bin_loop -> bin_record;
+    bin_record -> transaction;
+    
+    transaction -> consumer;
+    consumer -> match_block;
+    
+    {rank=same; csv tsv binary}
+    {rank=same; text_branch bin_sig}
+}
