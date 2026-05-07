@@ -65,15 +65,12 @@ impl<'a, R: Read> Iterator for CsvTransactions<'a, R> {
         let line = match self.reader.reader.fill_buf().ok()? {
             buf if buf.is_empty() => return None,
             buf => {
-                let end = buf.iter().position(|&b| b == b'\n').unwrap_or(buf.len());
+                let len = buf.iter().position(|&b| b == b'\n').unwrap_or(buf.len());
                 self.reader.buffer.clear();
                 self.reader
                     .buffer
-                    .extend(buf[..end].iter().map(|&b| b as char));
-                self.reader.reader.consume(end);
-                if end < buf.len() && buf[end] == b'\n' {
-                    self.reader.reader.consume(1);
-                }
+                    .extend(buf[..len].iter().map(|&b| b as char));
+                self.reader.reader.consume(len + 1); // +1 для \n
                 self.reader.line_num = line_num;
                 &self.reader.buffer[..]
             }
@@ -82,6 +79,32 @@ impl<'a, R: Read> Iterator for CsvTransactions<'a, R> {
         parse_transaction_line(line, line_num)
     }
 }
+
+// impl<'a, R: Read> Iterator for CsvTransactions<'a, R> {
+//     type Item = Result<Transaction, CsvError>;
+//
+//     fn next(&mut self) -> Option<Self::Item> {
+//         let line_num = self.reader.line_num + 1;
+//         let line = match self.reader.reader.fill_buf().ok()? {
+//             buf if buf.is_empty() => return None,
+//             buf => {
+//                 let end = buf.iter().position(|&b| b == b'\n').unwrap_or(buf.len());
+//                 self.reader.buffer.clear();
+//                 self.reader
+//                     .buffer
+//                     .extend(buf[..end].iter().map(|&b| b as char));
+//                 self.reader.reader.consume(end);
+//                 if end < buf.len() && buf[end] == b'\n' {
+//                     self.reader.reader.consume(1);
+//                 }
+//                 self.reader.line_num = line_num;
+//                 &self.reader.buffer[..]
+//             }
+//         };
+//
+//         parse_transaction_line(line, line_num)
+//     }
+// }
 
 fn parse_transaction_line(line: &str, line_num: usize) -> Option<Result<Transaction, CsvError>> {
     let fields = match parse_csv_line(line) {
@@ -132,7 +155,6 @@ fn parse_transaction_line(line: &str, line_num: usize) -> Option<Result<Transact
     }))
 }
 
-// parse_csv_line из предыдущего примера (без изменений)
 fn parse_csv_line(line: &str) -> Result<Vec<String>, String> {
     let mut fields = Vec::new();
     let mut field = String::new();
@@ -166,7 +188,7 @@ fn parse_csv_line(line: &str) -> Result<Vec<String>, String> {
 }
 
 fn main() -> io::Result<()> {
-    let file = File::open("transactions.csv")?;
+    let file = File::open("assets/transactions.csv")?;
     let mut csv = CsvReader::new(file);
 
     let mut total_income = 0i64;
