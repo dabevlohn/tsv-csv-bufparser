@@ -7,10 +7,11 @@ pub enum TransactionKind {
     Expense,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum RecordFormat {
-    Csv, // Запятая, кавычки
-    Tsv, // Точка с запятой без кавычек
+    Csv,
+    Tsv,
+    Binary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,18 +23,31 @@ pub struct Transaction {
 }
 
 #[derive(Debug)]
-pub struct ParseError {
-    msg: String,
-    line: usize,
+pub enum ParseError {
+    Io(std::io::Error),
+    Format(String, usize),
+    Binary { msg: String, record: usize },
 }
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Parse error at line {}: {}", self.line, self.msg)
+        match self {
+            ParseError::Io(e) => write!(f, "IO error: {}", e),
+            ParseError::Format(msg, line) => write!(f, "Parse error at line {}: {}", line, msg),
+            ParseError::Binary { msg, record } => {
+                write!(f, "Binary error at record {}: {}", record, msg)
+            }
+        }
     }
 }
 
 impl std::error::Error for ParseError {}
+
+impl From<std::io::Error> for ParseError {
+    fn from(e: std::io::Error) -> Self {
+        ParseError::Io(e)
+    }
+}
 
 pub struct Parser<R: Read> {
     reader: BufReader<R>,
@@ -65,6 +79,15 @@ impl<'a, R: Read> Iterator for ParserTransactions<'a, R> {
     type Item = Result<Transaction, ParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        match self.parser.format {
+            RecordFormat::Csv | RecordFormat::Tsv => self.next_text(),
+            RecordFormat::Binary => self.next_binary(),
+        }
+    }
+}
+
+impl<'a, R: Read> ParserTransactions<'a, R> {
+    fn next_text(&mut self) -> Option<Result<Transaction, ParseError>> {
         let line_num = self.parser.line_num + 1;
         let line = match self.parser.reader.fill_buf().ok()? {
             buf if buf.is_empty() => return None,
@@ -75,15 +98,92 @@ impl<'a, R: Read> Iterator for ParserTransactions<'a, R> {
                     .buffer
                     .extend(buf[..len].iter().map(|&b| b as char));
                 self.parser.reader.consume(len + 1); // +1 для \n
+                self.parser.line_num = line_num;
                 &self.parser.buffer[..]
             }
         };
 
-        parse_transaction_line(line, line_num, self.parser.format.clone())
+        parse_text_transaction(line, line_num, self.parser.format)
+    }
+
+    fn next_binary(&mut self) -> Option<Result<Transaction, ParseError>> {
+        let reader = self.parser.reader.get_mut();
+        let mut sig = [0u8; 4];
+        if reader.read_exact(&mut sig).is_err() {
+            return None;
+        }
+        if &sig != b"YPB1" {
+            return Some(Err(ParseError::Binary {
+                msg: "invalid signature".to_string(),
+                record: 0,
+            }));
+        }
+
+        let mut count_buf = [0u8; 4];
+        reader.read_exact(&mut count_buf).ok()?;
+        let count = u32::from_le_bytes(count_buf);
+
+        // Пропускаем до конца заголовка (читаем count)
+        for record_idx in 0..count {
+            match parse_binary_transaction(reader) {
+                Ok(trans) => return Some(Ok(trans)),
+                Err(e) => {
+                    return Some(Err(ParseError::Binary {
+                        msg: e.to_string(),
+                        record: (record_idx + 1) as usize,
+                    }))
+                }
+            }
+        }
+        None
     }
 }
 
-fn parse_transaction_line(
+fn parse_binary_transaction<R: Read>(reader: &mut R) -> Result<Transaction, String> {
+    // date: u16 len + bytes
+    let mut len_buf = [0u8; 2];
+    reader.read_exact(&mut len_buf).map_err(|_| "date len")?;
+    let date_len = u16::from_le_bytes(len_buf) as usize;
+    let mut date_bytes = vec![0u8; date_len];
+    reader
+        .read_exact(&mut date_bytes)
+        .map_err(|_| "date bytes")?;
+    let date = String::from_utf8(date_bytes).map_err(|_| "date utf8")?;
+
+    // category: u16 len + bytes
+    reader
+        .read_exact(&mut len_buf)
+        .map_err(|_| "category len")?;
+    let cat_len = u16::from_le_bytes(len_buf) as usize;
+    let mut cat_bytes = vec![0u8; cat_len];
+    reader
+        .read_exact(&mut cat_bytes)
+        .map_err(|_| "category bytes")?;
+    let category = String::from_utf8(cat_bytes).map_err(|_| "category utf8")?;
+
+    // kind: u8
+    let mut kind_buf = [0u8; 1];
+    reader.read_exact(&mut kind_buf).map_err(|_| "kind")?;
+    let kind = match kind_buf[0] {
+        0 => TransactionKind::Income,
+        1 => TransactionKind::Expense,
+        _ => return Err("invalid kind".to_string()),
+    };
+
+    // amount: i64 LE
+    let mut amount_buf = [0u8; 8];
+    reader.read_exact(&mut amount_buf).map_err(|_| "amount")?;
+    let amount = i64::from_le_bytes(amount_buf);
+
+    Ok(Transaction {
+        date,
+        category,
+        kind,
+        amount,
+    })
+}
+
+fn parse_text_transaction(
     line: &str,
     line_num: usize,
     format: RecordFormat,
@@ -91,23 +191,19 @@ fn parse_transaction_line(
     let fields = match format {
         RecordFormat::Csv => parse_csv_line(line),
         RecordFormat::Tsv => parse_tsv_line(line),
+        RecordFormat::Binary => parse_tsv_line(line),
     };
 
     let fields = match fields {
         Ok(f) => f,
-        Err(e) => {
-            return Some(Err(ParseError {
-                msg: e.to_string(),
-                line: line_num,
-            }))
-        }
+        Err(e) => return Some(Err(ParseError::Format(e.to_string(), line_num))),
     };
 
     if fields.len() != 4 {
-        return Some(Err(ParseError {
-            msg: format!("expected 4 fields, got {}", fields.len()),
-            line: line_num,
-        }));
+        return Some(Err(ParseError::Format(
+            format!("expected 4 fields, got {}", fields.len()),
+            line_num,
+        )));
     }
 
     let date = fields[0].clone();
@@ -117,19 +213,19 @@ fn parse_transaction_line(
         "income" => TransactionKind::Income,
         "expense" => TransactionKind::Expense,
         _ => {
-            return Some(Err(ParseError {
-                msg: format!("unknown kind: {}", kind_str),
-                line: line_num,
-            }))
+            return Some(Err(ParseError::Format(
+                format!("unknown kind: {}", kind_str),
+                line_num,
+            )))
         }
     };
     let amount = match fields[3].parse::<i64>() {
         Ok(a) => a,
         Err(_) => {
-            return Some(Err(ParseError {
-                msg: format!("invalid amount: {}", fields[3]),
-                line: line_num,
-            }))
+            return Some(Err(ParseError::Format(
+                format!("invalid amount: {}", fields[3]),
+                line_num,
+            )))
         }
     };
 
@@ -180,27 +276,24 @@ fn parse_tsv_line(line: &str) -> Result<Vec<String>, String> {
 }
 
 fn main() -> io::Result<()> {
-    // let tsv_file = File::open("assets/transactions.tsv")?;
-    // let mut parser = Parser::new(tsv_file, RecordFormat::Tsv);
+    // Текстовый CSV
     let csv_file = File::open("assets/transactions.csv")?;
-    let mut parser = Parser::new(csv_file, RecordFormat::Csv);
-    let mut total_income = 0i64;
-    let mut total_expense = 0i64;
+    let mut _csv_parser = Parser::new(csv_file, RecordFormat::Csv);
 
-    for trans in parser.transactions() {
+    // Текстовый TSV
+    let tsv_file = File::open("assets/transactions.tsv")?;
+    let mut _tsv_parser = Parser::new(tsv_file, RecordFormat::Tsv);
+
+    // Бинарный YPB1
+    // let bin_file = File::open("assets/transactions.ypb")?;
+    let bin_file = File::open("assets/transactions.bin")?;
+    let mut bin_parser = Parser::new(bin_file, RecordFormat::Binary);
+
+    for trans in bin_parser.transactions() {
         match trans {
-            Ok(t) => {
-                match t.kind {
-                    TransactionKind::Income => total_income += t.amount,
-                    TransactionKind::Expense => total_expense += t.amount,
-                }
-                println!("{:?}", t);
-            }
-            Err(e) => eprintln!("{}", e),
+            Ok(t) => println!("Binary: {:?}", t),
+            Err(e) => eprintln!("Binary error: {}", e),
         }
     }
-
-    println!("Income {}, Expense {}", total_income, total_expense);
-
     Ok(())
 }
