@@ -180,12 +180,14 @@ fn parse_tsv_line(line: &str) -> Result<Vec<String>, String> {
 }
 
 fn main() -> io::Result<()> {
-    let tsv_file = File::open("assets/transactions.tsv")?;
-    let mut tsv_parser = Parser::new(tsv_file, RecordFormat::Tsv);
+    // let tsv_file = File::open("assets/transactions.tsv")?;
+    // let mut parser = Parser::new(tsv_file, RecordFormat::Tsv);
+    let csv_file = File::open("assets/transactions.csv")?;
+    let mut parser = Parser::new(csv_file, RecordFormat::Csv);
     let mut total_income = 0i64;
     let mut total_expense = 0i64;
 
-    for trans in tsv_parser.transactions() {
+    for trans in parser.transactions() {
         match trans {
             Ok(t) => {
                 match t.kind {
@@ -198,7 +200,7 @@ fn main() -> io::Result<()> {
         }
     }
 
-    println!("TSV: Income {}, Expense {}", total_income, total_expense);
+    println!("Income {}, Expense {}", total_income, total_expense);
 
     Ok(())
 }
