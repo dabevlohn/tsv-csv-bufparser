@@ -8,109 +8,95 @@ pub enum TransactionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordFormat {
+    Csv, // Запятая, кавычки
+    Tsv, // Точка с запятой без кавычек
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transaction {
-    /// Дата операции в формате `YYYY-MM-DD`.
     pub date: String,
-    /// Категория операции.
     pub category: String,
-    /// Тип операции: доход или расход.
     pub kind: TransactionKind,
-    /// Сумма операции.
     pub amount: i64,
 }
 
 #[derive(Debug)]
-pub struct CsvError {
+pub struct ParseError {
     msg: String,
     line: usize,
 }
 
-impl std::fmt::Display for CsvError {
+impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CSV error at line {}: {}", self.line, self.msg)
+        write!(f, "Parse error at line {}: {}", self.line, self.msg)
     }
 }
 
-impl std::error::Error for CsvError {}
+impl std::error::Error for ParseError {}
 
-pub struct CsvReader<R: Read> {
+pub struct Parser<R: Read> {
     reader: BufReader<R>,
     buffer: String,
     line_num: usize,
+    format: RecordFormat,
 }
 
-impl<R: Read> CsvReader<R> {
-    pub fn new(reader: R) -> Self {
+impl<R: Read> Parser<R> {
+    pub fn new(reader: R, format: RecordFormat) -> Self {
         Self {
             reader: BufReader::new(reader),
             buffer: String::new(),
             line_num: 0,
+            format,
         }
     }
 
-    pub fn transactions(&mut self) -> CsvTransactions<'_, R> {
-        CsvTransactions { reader: self }
+    pub fn transactions(&mut self) -> ParserTransactions<'_, R> {
+        ParserTransactions { parser: self }
     }
 }
 
-pub struct CsvTransactions<'a, R: Read> {
-    reader: &'a mut CsvReader<R>,
+pub struct ParserTransactions<'a, R: Read> {
+    parser: &'a mut Parser<R>,
 }
 
-impl<'a, R: Read> Iterator for CsvTransactions<'a, R> {
-    type Item = Result<Transaction, CsvError>;
+impl<'a, R: Read> Iterator for ParserTransactions<'a, R> {
+    type Item = Result<Transaction, ParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let line_num = self.reader.line_num + 1;
-        let line = match self.reader.reader.fill_buf().ok()? {
+        let line_num = self.parser.line_num + 1;
+        let line = match self.parser.reader.fill_buf().ok()? {
             buf if buf.is_empty() => return None,
             buf => {
                 let len = buf.iter().position(|&b| b == b'\n').unwrap_or(buf.len());
-                self.reader.buffer.clear();
-                self.reader
+                self.parser.buffer.clear();
+                self.parser
                     .buffer
                     .extend(buf[..len].iter().map(|&b| b as char));
-                self.reader.reader.consume(len + 1); // +1 для \n
-                self.reader.line_num = line_num;
-                &self.reader.buffer[..]
+                self.parser.reader.consume(len + 1); // +1 для \n
+                &self.parser.buffer[..]
             }
         };
 
-        parse_transaction_line(line, line_num)
+        parse_transaction_line(line, line_num, self.parser.format.clone())
     }
 }
 
-// impl<'a, R: Read> Iterator for CsvTransactions<'a, R> {
-//     type Item = Result<Transaction, CsvError>;
-//
-//     fn next(&mut self) -> Option<Self::Item> {
-//         let line_num = self.reader.line_num + 1;
-//         let line = match self.reader.reader.fill_buf().ok()? {
-//             buf if buf.is_empty() => return None,
-//             buf => {
-//                 let end = buf.iter().position(|&b| b == b'\n').unwrap_or(buf.len());
-//                 self.reader.buffer.clear();
-//                 self.reader
-//                     .buffer
-//                     .extend(buf[..end].iter().map(|&b| b as char));
-//                 self.reader.reader.consume(end);
-//                 if end < buf.len() && buf[end] == b'\n' {
-//                     self.reader.reader.consume(1);
-//                 }
-//                 self.reader.line_num = line_num;
-//                 &self.reader.buffer[..]
-//             }
-//         };
-//
-//         parse_transaction_line(line, line_num)
-//     }
-// }
+fn parse_transaction_line(
+    line: &str,
+    line_num: usize,
+    format: RecordFormat,
+) -> Option<Result<Transaction, ParseError>> {
+    let fields = match format {
+        RecordFormat::Csv => parse_csv_line(line),
+        RecordFormat::Tsv => parse_tsv_line(line),
+    };
 
-fn parse_transaction_line(line: &str, line_num: usize) -> Option<Result<Transaction, CsvError>> {
-    let fields = match parse_csv_line(line) {
+    let fields = match fields {
         Ok(f) => f,
         Err(e) => {
-            return Some(Err(CsvError {
+            return Some(Err(ParseError {
                 msg: e.to_string(),
                 line: line_num,
             }))
@@ -118,7 +104,7 @@ fn parse_transaction_line(line: &str, line_num: usize) -> Option<Result<Transact
     };
 
     if fields.len() != 4 {
-        return Some(Err(CsvError {
+        return Some(Err(ParseError {
             msg: format!("expected 4 fields, got {}", fields.len()),
             line: line_num,
         }));
@@ -126,12 +112,12 @@ fn parse_transaction_line(line: &str, line_num: usize) -> Option<Result<Transact
 
     let date = fields[0].clone();
     let category = fields[1].clone();
-    let kind_str = &fields[2];
-    let kind = match kind_str.as_str() {
+    let kind_str = fields[2].as_str();
+    let kind = match kind_str {
         "income" => TransactionKind::Income,
         "expense" => TransactionKind::Expense,
         _ => {
-            return Some(Err(CsvError {
+            return Some(Err(ParseError {
                 msg: format!("unknown kind: {}", kind_str),
                 line: line_num,
             }))
@@ -140,7 +126,7 @@ fn parse_transaction_line(line: &str, line_num: usize) -> Option<Result<Transact
     let amount = match fields[3].parse::<i64>() {
         Ok(a) => a,
         Err(_) => {
-            return Some(Err(CsvError {
+            return Some(Err(ParseError {
                 msg: format!("invalid amount: {}", fields[3]),
                 line: line_num,
             }))
@@ -155,6 +141,7 @@ fn parse_transaction_line(line: &str, line_num: usize) -> Option<Result<Transact
     }))
 }
 
+// CSV парсер (с кавычками)
 fn parse_csv_line(line: &str) -> Result<Vec<String>, String> {
     let mut fields = Vec::new();
     let mut field = String::new();
@@ -187,14 +174,18 @@ fn parse_csv_line(line: &str) -> Result<Vec<String>, String> {
     Ok(fields)
 }
 
-fn main() -> io::Result<()> {
-    let file = File::open("assets/transactions.csv")?;
-    let mut csv = CsvReader::new(file);
+// TSV парсер (точка с запятой, без кавычек)
+fn parse_tsv_line(line: &str) -> Result<Vec<String>, String> {
+    Ok(line.split(';').map(|s| s.trim().to_string()).collect())
+}
 
+fn main() -> io::Result<()> {
+    let tsv_file = File::open("assets/transactions.tsv")?;
+    let mut tsv_parser = Parser::new(tsv_file, RecordFormat::Tsv);
     let mut total_income = 0i64;
     let mut total_expense = 0i64;
 
-    for trans in csv.transactions() {
+    for trans in tsv_parser.transactions() {
         match trans {
             Ok(t) => {
                 match t.kind {
@@ -207,6 +198,7 @@ fn main() -> io::Result<()> {
         }
     }
 
-    println!("Total income: {}, expense: {}", total_income, total_expense);
+    println!("TSV: Income {}, Expense {}", total_income, total_expense);
+
     Ok(())
 }
